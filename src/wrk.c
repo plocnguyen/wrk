@@ -9,6 +9,7 @@ static struct config {
     uint64_t duration;
     uint64_t threads;
     uint64_t timeout;
+    uint64_t keep_alive;
     uint64_t pipeline;
     bool     delay;
     bool     dynamic;
@@ -47,6 +48,8 @@ static void usage() {
            "    -c, --connections <N>  Connections to keep open   \n"
            "    -d, --duration    <T>  Duration of test           \n"
            "    -t, --threads     <N>  Number of threads to use   \n"
+           "    -k, --keep_alive  <N>  Number of requests before  \n"
+           "                           closing a connection       \n"
            "                                                      \n"
            "    -s, --script      <S>  Load Lua script file       \n"
            "    -H, --header      <H>  Add header to request      \n"
@@ -348,7 +351,8 @@ static int response_complete(http_parser *parser) {
         aeCreateFileEvent(thread->loop, c->fd, AE_WRITABLE, socket_writeable, c);
     }
 
-    if (!http_should_keep_alive(parser)) {
+    if (!http_should_keep_alive(parser) ||
+        (cfg.keep_alive > 0 && ++c->requests >= cfg.keep_alive)) {
         reconnect_socket(thread, c);
         goto done;
     }
@@ -370,6 +374,7 @@ static void socket_connected(aeEventLoop *loop, int fd, void *data, int mask) {
 
     http_parser_init(&c->parser, HTTP_RESPONSE);
     c->written = 0;
+    c->requests = 0;
 
     aeCreateFileEvent(c->thread->loop, fd, AE_READABLE, socket_readable, c);
     aeCreateFileEvent(c->thread->loop, fd, AE_WRITABLE, socket_writeable, c);
@@ -474,6 +479,7 @@ static struct option longopts[] = {
     { "header",      required_argument, NULL, 'H' },
     { "latency",     no_argument,       NULL, 'L' },
     { "timeout",     required_argument, NULL, 'T' },
+    { "keep_alive",  required_argument, NULL, 'k' },
     { "help",        no_argument,       NULL, 'h' },
     { "version",     no_argument,       NULL, 'v' },
     { NULL,          0,                 NULL,  0  }
@@ -488,8 +494,9 @@ static int parse_args(struct config *cfg, char **url, struct http_parser_url *pa
     cfg->connections = 10;
     cfg->duration    = 10;
     cfg->timeout     = SOCKET_TIMEOUT_MS;
+    cfg->keep_alive  = 0;
 
-    while ((c = getopt_long(argc, argv, "t:c:d:s:H:T:Lrv?", longopts, NULL)) != -1) {
+    while ((c = getopt_long(argc, argv, "t:c:d:s:H:T:k:Lrv?", longopts, NULL)) != -1) {
         switch (c) {
             case 't':
                 if (scan_metric(optarg, &cfg->threads)) return -1;
@@ -512,6 +519,9 @@ static int parse_args(struct config *cfg, char **url, struct http_parser_url *pa
             case 'T':
                 if (scan_time(optarg, &cfg->timeout)) return -1;
                 cfg->timeout *= 1000;
+                break;
+            case 'k':
+                if (scan_metric(optarg, &cfg->keep_alive)) return -1;
                 break;
             case 'v':
                 printf("wrk %s [%s] ", VERSION, aeGetApiName());
